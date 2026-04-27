@@ -23,14 +23,15 @@ import numpy as np
 from pathlib import Path
 
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QRectF, QPointF, QUrl,
+    Qt, QTimer, QThread, pyqtSignal, QRectF, QPointF, QUrl, QSize,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QGuiApplication, QKeyEvent, QPainter, QPen, QBrush,
-    QPainterPath, QRadialGradient, QLinearGradient,
+    QPainterPath, QRadialGradient, QLinearGradient, QImage,
 )
-from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PyQt6.QtMultimediaWidgets import QVideoWidget
+from PyQt6.QtMultimedia import (
+    QMediaPlayer, QAudioOutput, QVideoSink, QVideoFrame, QSoundEffect,
+)
 from PyQt6.QtWidgets import (
     QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget,
     QHBoxLayout, QGraphicsDropShadowEffect, QProgressBar, QStackedLayout,
@@ -466,6 +467,131 @@ class StatusBar(QWidget):
         p.drawText(bar_rect, Qt.AlignmentFlag.AlignCenter, self._text)
 
 
+# ───────────────────────────────────────────────── Video pose background
+
+class VideoBackground(QWidget):
+    """Plays per-state mascot pose videos as the lockscreen backdrop.
+
+    Uses ``QVideoSink`` so each decoded frame arrives as a ``QImage`` we
+    paint ourselves. This lets all HUD widgets sit naturally on top —
+    unlike ``QVideoWidget`` which is a native window that always renders
+    above sibling Qt widgets on macOS (the bug the previous build hit).
+    """
+
+    POSES = ("idle", "listening", "processing", "granted", "denied", "erasing")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAutoFillBackground(False)
+
+        self._sink = QVideoSink(self)
+        self._sink.videoFrameChanged.connect(self._on_frame)
+        self._frame_image = None  # type: QImage | None
+
+        self._player = QMediaPlayer(self)
+        self._audio_out = QAudioOutput(self)
+        # Mute source video audio — short cues are played separately so
+        # we control which sound triggers per state.
+        self._audio_out.setMuted(True)
+        self._player.setAudioOutput(self._audio_out)
+        self._player.setVideoSink(self._sink)
+        self._player.setLoops(QMediaPlayer.Loops.Infinite)
+
+        self._sources = {}
+        self._current_pose = None
+        self._red_wash = 0.0   # erasure red overlay strength (0..1)
+
+    # ── Source loading ────────────────────────────────────────────────
+
+    def load_poses(self, pose_dir: Path):
+        for name in self.POSES:
+            f = pose_dir / f"pose_{name}.mp4"
+            if f.exists():
+                self._sources[name] = f
+        log.info("VideoBackground loaded %d poses from %s",
+                 len(self._sources), pose_dir)
+
+    def has_pose(self, name: str) -> bool:
+        return name in self._sources
+
+    def set_pose(self, name: str):
+        if name == self._current_pose:
+            return
+        if name not in self._sources:
+            log.warning("VideoBackground: pose %r not available", name)
+            return
+        self._current_pose = name
+        self._red_wash = 0.7 if name == "erasing" else 0.0
+        self._player.stop()
+        self._player.setSource(QUrl.fromLocalFile(str(self._sources[name])))
+        self._player.play()
+
+    # ── Frame handling ────────────────────────────────────────────────
+
+    def _on_frame(self, frame: QVideoFrame):
+        if not frame.isValid():
+            return
+        img = frame.toImage()
+        if img.isNull():
+            return
+        if img.format() != QImage.Format.Format_RGB32:
+            img = img.convertToFormat(QImage.Format.Format_RGB32)
+        self._frame_image = img
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        if self._frame_image is None or self._frame_image.isNull():
+            p.fillRect(self.rect(), BG_DEEP)
+            return
+
+        widget_w, widget_h = self.width(), self.height()
+        img_w, img_h = self._frame_image.width(), self._frame_image.height()
+        if img_w == 0 or img_h == 0:
+            return
+        # Cover-fit (fill, crop overflow) so the mascot stays full-screen
+        widget_ratio = widget_w / widget_h
+        img_ratio = img_w / img_h
+        if widget_ratio > img_ratio:
+            draw_w = widget_w
+            draw_h = int(widget_w / img_ratio)
+        else:
+            draw_h = widget_h
+            draw_w = int(widget_h * img_ratio)
+        x = (widget_w - draw_w) // 2
+        y = (widget_h - draw_h) // 2
+
+        p.fillRect(self.rect(), BLACK)
+        p.drawImage(QRectF(x, y, draw_w, draw_h), self._frame_image)
+
+        # Erasure red wash
+        if self._red_wash > 0.0:
+            p.fillRect(self.rect(),
+                       QColor(180, 0, 0, int(120 * self._red_wash)))
+
+        # Vignette to anchor HUD
+        vignette = QRadialGradient(
+            QPointF(widget_w / 2, widget_h / 2),
+            max(widget_w, widget_h) * 0.75,
+        )
+        vignette.setColorAt(0.55, QColor(0, 0, 0, 0))
+        vignette.setColorAt(1.0, QColor(0, 0, 0, 180))
+        p.fillRect(self.rect(), QBrush(vignette))
+
+        # Top HUD scrim
+        top_band = QLinearGradient(0, 0, 0, 140)
+        top_band.setColorAt(0.0, QColor(0, 0, 0, 170))
+        top_band.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.fillRect(QRectF(0, 0, widget_w, 140), QBrush(top_band))
+        # Bottom HUD scrim
+        bot_band = QLinearGradient(0, widget_h - 340, 0, widget_h)
+        bot_band.setColorAt(0.0, QColor(0, 0, 0, 0))
+        bot_band.setColorAt(1.0, QColor(0, 0, 0, 200))
+        p.fillRect(QRectF(0, widget_h - 340, widget_w, 340), QBrush(bot_band))
+
+
 # ───────────────────────────────────────────────────────── Main lock window
 
 class LockWindow(QMainWindow):
@@ -497,34 +623,46 @@ class LockWindow(QMainWindow):
         central.setStyleSheet(f"background: {BG_DEEP.name()};")
         self.setCentralWidget(central)
 
-        # ── Layer 1: video background (fills the whole window)
-        self.video_widget = QVideoWidget(central)
-        self.video_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.media_player = QMediaPlayer(self)
-        self.audio_out = QAudioOutput(self)
-        self.audio_out.setMuted(True)  # video is silent — we don't want audio
-        self.media_player.setAudioOutput(self.audio_out)
-        self.media_player.setVideoOutput(self.video_widget)
-        self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
-
-        # Look for the bundled video in two places:
-        #   1. Inside the package (sivaji_unlocker/assets/) — always works when pip-installed
-        #   2. Repo-relative ../assets/ — works when running from source
+        # ── Layer 1: state-driven video background (mascot poses)
+        # Custom widget that paints decoded QVideoFrames into its own canvas
+        # via QVideoSink. This avoids the QVideoWidget native-window issue
+        # where overlays were getting hidden behind the video on macOS.
         pkg_dir = Path(__file__).resolve().parent
-        candidates = [
-            pkg_dir / "assets" / "lock_background.mp4",
-            pkg_dir.parent / "assets" / "lock_background.mp4",
+        pose_candidates = [
+            pkg_dir / "assets" / "poses",
+            pkg_dir.parent / "assets" / "poses",
         ]
-        bg_path = next((p for p in candidates if p.exists()), candidates[0])
-        if not bg_path.exists():
-            # Fallback to old hand-drawn arena if the asset is missing
-            log.warning("lock_background.mp4 not found at %s — using arena fallback", bg_path)
-            self.video_widget.hide()
-            self.bg = ArenaBackground(central)
-        else:
-            self.media_player.setSource(QUrl.fromLocalFile(str(bg_path)))
-            self.media_player.play()
+        pose_dir = next((p for p in pose_candidates if p.is_dir()),
+                       pose_candidates[0])
+
+        self.video_bg = VideoBackground(central)
+        if pose_dir.is_dir():
+            self.video_bg.load_poses(pose_dir)
+        if self.video_bg.has_pose("idle"):
+            self.video_bg.set_pose("idle")
             self.bg = None
+        else:
+            log.warning("No pose videos in %s — using arena fallback", pose_dir)
+            self.video_bg.hide()
+            self.bg = ArenaBackground(central)
+
+        # Audio cues per state (mascot voice extracted from the source clip)
+        cue_candidates = [
+            pkg_dir / "assets" / "cues",
+            pkg_dir.parent / "assets" / "cues",
+        ]
+        cue_dir = next((p for p in cue_candidates if p.is_dir()),
+                      cue_candidates[0])
+        self._cues: dict[str, QSoundEffect] = {}
+        if cue_dir.is_dir():
+            for state in ("listening", "granted", "denied"):
+                f = cue_dir / f"cue_{state}.wav"
+                if f.exists():
+                    eff = QSoundEffect(self)
+                    eff.setSource(QUrl.fromLocalFile(str(f)))
+                    eff.setVolume(0.85 if state == "granted" else 0.7)
+                    self._cues[state] = eff
+            log.info("Loaded %d audio cues from %s", len(self._cues), cue_dir)
 
         # ── Layer 2: foreground UI overlay (transparent panel)
         self.overlay = QWidget(central)
@@ -614,9 +752,19 @@ class LockWindow(QMainWindow):
         self.erase_bar.hide()
         outer.addWidget(self.erase_bar)
 
-        # No mascot or waveform widgets — the video is doing both visually.
+        # Waveform widget sits between the hint and the status bar so it
+        # animates the user's voice in real time, on top of the video.
+        self.waveform = WaveformDisplay()
+        self.waveform.setFixedHeight(80)
+        self.waveform.setStyleSheet("background: transparent;")
+        # Insert before the status bar (last added widget). Layout index of
+        # the status bar is len(layout)-2 because erase_bar follows.
+        sb_index = outer.indexOf(self.status_bar_widget)
+        outer.insertWidget(sb_index, self.waveform)
+        outer.insertSpacing(sb_index + 1, 6)
+
+        # Mascot is now the video itself — keep attribute for safe helpers.
         self.mascot = None
-        self.waveform = None
 
     def _make_fullscreen(self):
         self.setWindowFlags(
@@ -642,9 +790,9 @@ class LockWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "video_widget") and self.video_widget is not None:
-            self.video_widget.setGeometry(self.rect())
-            self.video_widget.lower()
+        if hasattr(self, "video_bg") and self.video_bg is not None:
+            self.video_bg.setGeometry(self.rect())
+            self.video_bg.lower()
         if hasattr(self, "bg") and self.bg is not None:
             self.bg.setGeometry(self.rect())
             self.bg.lower()
@@ -658,10 +806,33 @@ class LockWindow(QMainWindow):
         from datetime import datetime
         self.clock_label.setText(datetime.now().strftime("%a %d %b  %H:%M:%S"))
 
-    # ── Safe helpers: mascot/waveform may be None when video bg is active
+    # ── Safe helpers: drive both legacy mascot widget and video background
+    _STATE_TO_POSE = {
+        "idle": "idle",
+        "listening": "listening",
+        "processing": "processing",
+        "ok": "granted",
+        "granted": "granted",
+        "fail": "denied",
+        "denied": "denied",
+        "erasing": "erasing",
+    }
+
     def _set_mascot(self, mode: str):
         if self.mascot is not None:
             self.mascot.set_mode(mode)
+        if hasattr(self, "video_bg") and self.video_bg is not None:
+            pose = self._STATE_TO_POSE.get(mode, "idle")
+            self.video_bg.set_pose(pose)
+
+    def _play_cue(self, name: str):
+        eff = getattr(self, "_cues", {}).get(name)
+        if eff is not None:
+            try:
+                eff.stop()
+                eff.play()
+            except Exception:  # pragma: no cover
+                pass
 
     def _wf_push(self, rms: float):
         if self.waveform is not None:
@@ -676,6 +847,7 @@ class LockWindow(QMainWindow):
             return
         self._wf_push(rms)
         if voiced and self.status_bar_widget._text == config.IDLE_TEXT:
+            self._set_mascot("listening")
             self.status_bar_widget.set_text(config.LISTENING_TEXT, TEXT_CYAN)
             self._wf_intensity(0.6)
 
@@ -685,6 +857,7 @@ class LockWindow(QMainWindow):
         self._set_mascot("listening")
         self.status_bar_widget.set_text(config.PROCESSING_TEXT, TEXT_CYAN)
         self._wf_intensity(1.0)
+        self._play_cue("listening")
 
     def _on_waveform_arrived(self, samples):
         if self.waveform is None or samples is None or len(samples) == 0:
@@ -699,6 +872,7 @@ class LockWindow(QMainWindow):
         self._set_mascot("ok")
         self.status_bar_widget.set_text(config.SUCCESS_TEXT, TEXT_WHITE)
         self._wf_intensity(0.4)
+        self._play_cue("granted")
         log.info("Unlocked. similarity=%.3f", sim)
         if self.worker:
             self.worker.stop()
@@ -709,6 +883,7 @@ class LockWindow(QMainWindow):
         self.fail_count += 1
         line = random.choice(config.MOCK_LINES)
         self.status_bar_widget.set_text(line, QColor("#FFE0E0"))
+        self._play_cue("denied")
 
         if self.fail_count >= config.MAX_ATTEMPTS:
             self._trigger_erasure()
@@ -720,9 +895,11 @@ class LockWindow(QMainWindow):
             self._wf_intensity(0.0)
             if self.worker:
                 self.worker.pause(False)
+        # Hold the denied pose for ~2.2s before going back to idle
         QTimer.singleShot(2200, _rearm)
 
     def _trigger_erasure(self):
+        self._set_mascot("erasing")
         self.status_bar_widget.set_text(config.ERASURE_TEXT, QColor("#FFE0E0"))
         self.erase_bar.setValue(0)
         self.erase_bar.show()

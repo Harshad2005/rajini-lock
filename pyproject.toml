@@ -40,4 +40,9 @@ Repository = "https://github.com/Harshad2005/rajini-lock"
 include = ["sivaji_unlocker*"]
 
 [tool.setuptools.package-data]
-sivaji_unlocker = ["assets/*.mp4", "assets/*.png"]
+sivaji_unlocker = [
+    "assets/*.mp4",
+    "assets/*.png",
+    "assets/poses/*.mp4",
+    "assets/cues/*.wav",
+]
