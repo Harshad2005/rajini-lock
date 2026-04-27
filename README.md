@@ -51,7 +51,7 @@ This is that. On your Mac. Actually working.
 
 ```bash
 # 1. Clone
-git clone https://github.com/harshadmahajan63/rajini-lock.git
+git clone https://github.com/Harshad2005/rajini-lock.git
 cd rajini-lock
 
 # 2. Install
@@ -153,7 +153,7 @@ This is a **fan project**, not enterprise security. Be honest with yourself abou
 - **Voice changes break it.** Cold, fatigue, drinks — re-enroll if accuracy drops.
 - **Mic permissions on first run.** macOS will prompt the first time the LaunchAgent tries to use your mic. Approve it in System Settings → Privacy & Security → Microphone.
 
-If you want a *real* macOS login replacement (a SecurityAgent plug-in), see the open issue [#1 — SecurityAgent plug-in branch](https://github.com/harshadmahajan63/rajini-lock/issues/1). It's much more invasive (requires Objective-C, code signing, possible SIP changes) and has real lockout risk. PRs welcome.
+If you want a *real* macOS login replacement (a SecurityAgent plug-in), see the open issue [#1 — SecurityAgent plug-in branch](https://github.com/Harshad2005/rajini-lock/issues/1). It's much more invasive (requires Objective-C, code signing, possible SIP changes) and has real lockout risk. PRs welcome.
 
 ---
 
@@ -198,7 +198,7 @@ PRs and issues warmly welcomed. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - Voice embeddings: [**Resemblyzer**](https://github.com/resemble-ai/Resemblyzer) by Resemble.ai
 - UI: [**PyQt6**](https://www.riverbankcomputing.com/software/pyqt/)
 - Audio I/O: [**sounddevice**](https://python-sounddevice.readthedocs.io/) + PortAudio
-- Built by [**@harshadmahajan63**](https://github.com/harshadmahajan63)
+- Built by [**@Harshad2005**](https://github.com/harshadmahajan63)
 
 If this made you smile, drop a ⭐. If it broke your Mac, see [Recovery](#-emergency-exits-please-read). If it unlocked the boss in you — *Sivaji-kku apparam yevan da?* 😎
 

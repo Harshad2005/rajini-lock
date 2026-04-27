@@ -33,8 +33,8 @@ rajini-disable = "sivaji_unlocker.cli:disable"
 rajini-enable = "sivaji_unlocker.cli:enable"
 
 [project.urls]
-Homepage = "https://github.com/harshadmahajan63/rajini-lock"
-Repository = "https://github.com/harshadmahajan63/rajini-lock"
+Homepage = "https://github.com/Harshad2005/rajini-lock"
+Repository = "https://github.com/Harshad2005/rajini-lock"
 
 [tool.setuptools.packages.find]
 include = ["sivaji_unlocker*"]
