@@ -88,7 +88,18 @@ ok "Source installed"
 # ── Create venv
 if [[ ! -d "$INSTALL_DIR/venv" ]]; then
   info "Creating virtualenv ..."
-  "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
+  # Try venv first; fall back to virtualenv (avoids ensurepip bugs on some
+  # Homebrew Python installs).
+  if ! "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv" 2>/dev/null; then
+    warn "venv failed (likely ensurepip issue) \u2014 trying --without-pip + manual pip bootstrap"
+    rm -rf "$INSTALL_DIR/venv"
+    "$PYTHON_BIN" -m venv --without-pip "$INSTALL_DIR/venv"
+    "$INSTALL_DIR/venv/bin/python" -c "import urllib.request, sys; \
+urllib.request.urlretrieve('https://bootstrap.pypa.io/get-pip.py', '/tmp/get-pip.py')" \
+      || { err "Could not download get-pip.py"; exit 1; }
+    "$INSTALL_DIR/venv/bin/python" /tmp/get-pip.py --quiet
+    rm -f /tmp/get-pip.py
+  fi
 fi
 
 # ── Install dependencies
