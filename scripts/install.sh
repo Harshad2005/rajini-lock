@@ -42,13 +42,37 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 1
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-  err "python3 not found. Install with:  brew install python@3.12"
+# Find a Python >= 3.10. Prefer Homebrew's modern versions over the
+# Apple-shipped /usr/bin/python3 (which is stuck at 3.9 on most macOS versions).
+PYTHON_BIN=""
+for candidate in \
+    /opt/homebrew/bin/python3.12 \
+    /opt/homebrew/bin/python3.11 \
+    /opt/homebrew/bin/python3.13 \
+    /opt/homebrew/bin/python3.10 \
+    /usr/local/bin/python3.12 \
+    /usr/local/bin/python3.11 \
+    /usr/local/bin/python3.13 \
+    /usr/local/bin/python3.10 \
+    python3.12 python3.11 python3.13 python3.10 python3; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    PY_OK=$("$candidate" -c 'import sys; print(1 if sys.version_info >= (3,10) else 0)' 2>/dev/null || echo 0)
+    if [[ "$PY_OK" == "1" ]]; then
+      PYTHON_BIN="$(command -v "$candidate")"
+      break
+    fi
+  fi
+done
+
+if [[ -z "$PYTHON_BIN" ]]; then
+  err "No Python >= 3.10 found."
+  err "macOS ships with Python 3.9 which is too old. Install a newer one with:"
+  err "  brew install python@3.12"
   exit 1
 fi
 
-PY_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')
-info "Using Python $PY_VERSION"
+PY_VERSION=$("$PYTHON_BIN" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}.{sys.version_info[2]}")')
+info "Using Python $PY_VERSION  ($PYTHON_BIN)"
 
 # ── Create folders
 mkdir -p "$APP_SUPPORT" "$INSTALL_DIR" "$LAUNCHAGENTS"
@@ -64,7 +88,7 @@ ok "Source installed"
 # ── Create venv
 if [[ ! -d "$INSTALL_DIR/venv" ]]; then
   info "Creating virtualenv ..."
-  python3 -m venv "$INSTALL_DIR/venv"
+  "$PYTHON_BIN" -m venv "$INSTALL_DIR/venv"
 fi
 
 # ── Install dependencies
