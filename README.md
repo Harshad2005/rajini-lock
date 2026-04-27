@@ -182,7 +182,7 @@ ffmpeg -y -framerate 12 -i demo/anim/frame_%03d.png \
 ## 🗺️ Roadmap
 
 - [ ] **SecurityAgent plug-in** — replace the actual macOS login window (Obj-C, opt-in branch)
-- [ ] **Wake-word "Hey Boss"** — no need to click PRESS TO SPEAK
+- [x] **Always-listening VAD** — no buttons, just speak (shipped)
 - [ ] **Anti-spoof** — RawNet2 liveness check
 - [ ] **Custom passphrase mode** — speaker + phrase verification
 - [ ] **Notarized `.dmg` installer** — no Terminal needed

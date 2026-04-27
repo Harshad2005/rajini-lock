@@ -24,11 +24,15 @@ sys.path.insert(0, str(REPO))
 import sivaji_unlocker.audio as audio_mod
 audio_mod.load_voiceprint = lambda: np.ones(256, dtype=np.float32)
 
-# Don't go fullscreen
+# Don't go fullscreen, and don't actually start the listener thread
 import sivaji_unlocker.ui as ui_mod
 ui_mod.LockWindow._make_fullscreen = lambda self: self.resize(1600, 1000)
+ui_mod.LockWindow._start_listener = lambda self: None
 
-from sivaji_unlocker.ui import LockWindow, CYAN, RED, GREEN
+from sivaji_unlocker.ui import (
+    LockWindow, TEXT_CYAN, TEXT_WHITE, RAIL_RED,
+)
+from sivaji_unlocker import config
 
 OUT = REPO / "demo" / "frames"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -40,19 +44,20 @@ def render(scenes):
     for name, setup in scenes:
         win = LockWindow()
         win.resize(1600, 1000)
-        win.overlay.setGeometry(win.rect())
+        win.bg.setGeometry(win.rect())
         win.show()
         app.processEvents()
-        # Stop the auto-running mic timer so the radar stays still
-        win.mic._timer.stop()
-        win.overlay._timer.stop()
+        # Freeze internal animation timers for deterministic frames
+        win.bg._timer.stop()
+        win.mascot._timer.stop()
+        win.waveform._timer.stop()
+        win.status_bar_widget._timer.stop()
         win._clock_timer.stop()
         if hasattr(win, '_erase_timer'):
             win._erase_timer.stop()
 
         setup(win)
         app.processEvents()
-        # Allow paint events to flush
         for _ in range(8):
             app.processEvents()
 
@@ -66,58 +71,85 @@ def render(scenes):
         app.processEvents()
 
 
-def fake_wave():
-    return (np.sin(np.linspace(0, 12 * np.pi, 200)) *
-            np.random.uniform(0.3, 1.0, 200)).astype(np.float32)
+def fake_wave(amp=1.0, n=220):
+    rng = np.random.default_rng(7)
+    return np.abs(np.sin(np.linspace(0, 14 * np.pi, n)) *
+                  rng.uniform(0.4, 1.0, n) * amp).astype(np.float32)
 
 
 def s_idle(w):
-    w.mic.set_mode("idle")
+    w.mascot.set_mode("idle")
+    w.status_bar_widget.set_text(config.IDLE_TEXT, TEXT_CYAN)
+    # Set a flat waveform
+    w.waveform._buffer.clear()
+    for v in [0.04] * 220:
+        w.waveform._buffer.append(v)
+    w.waveform._intensity = 0.0
 
 
 def s_listening(w):
-    w.mic.set_mode("listening")
-    w.mic.set_waveform(fake_wave())
-    w._set_status("◉ LISTENING ◉", CYAN)
-    w._set_footer("RECORDING")
+    w.mascot.set_mode("listening")
+    w.status_bar_widget.set_text(config.LISTENING_TEXT, TEXT_CYAN)
+    wave = fake_wave(0.6)
+    w.waveform._buffer.clear()
+    for v in wave:
+        w.waveform._buffer.append(float(v))
+    w.waveform._intensity = 0.7
 
 
 def s_processing(w):
-    w.mic.set_mode("processing")
-    w._set_status("ANALYZING VOICEPRINT...", CYAN)
-    w._set_footer("ANALYZING")
+    w.mascot.set_mode("listening")
+    w.status_bar_widget.set_text(config.PROCESSING_TEXT, TEXT_CYAN)
+    wave = fake_wave(1.0)
+    w.waveform._buffer.clear()
+    for v in wave:
+        w.waveform._buffer.append(float(v))
+    w.waveform._intensity = 1.0
 
 
 def s_granted(w):
-    w.mic.set_mode("ok")
-    w._set_status("ACCESS GRANTED — MATCH 92.7%", GREEN)
-    w._set_footer("UNLOCKED")
+    w.mascot.set_mode("ok")
+    w.status_bar_widget.set_text(config.SUCCESS_TEXT, TEXT_WHITE)
+    wave = fake_wave(0.3)
+    w.waveform._buffer.clear()
+    for v in wave:
+        w.waveform._buffer.append(float(v))
+    w.waveform._intensity = 0.4
 
 
 def s_denied(w):
-    w.mic.set_mode("fail")
+    w.mascot.set_mode("fail")
     w.fail_count = 1
-    w._set_status("ACCESS DENIED — MIMICRY DETECTED. MGR-um naan-illa, SIVAJI-um naan-illa. (38.8%)", RED)
-    w._set_footer("FAILED")
-    w.footer.setText(w._footer_text("FAILED"))
+    w.status_bar_widget.set_text(
+        "voice not recognised. nice try, buddy.",
+        ui_mod.QColor("#FFE0E0"),
+    )
+    wave = fake_wave(0.7)
+    w.waveform._buffer.clear()
+    for v in wave:
+        w.waveform._buffer.append(float(v))
+    w.waveform._intensity = 0.6
 
 
 def s_erasure(w):
     w.fail_count = 3
-    w.mic.set_mode("fail")
-    w._set_status("ERASING ALL DATA", RED)
-    w._set_footer("DATA ERASURE")
-    w.footer.setText(w._footer_text("DATA ERASURE"))
+    w.mascot.set_mode("fail")
+    w.status_bar_widget.set_text(config.ERASURE_TEXT,
+                                 ui_mod.QColor("#FFE0E0"))
     w.erase_bar.setValue(67)
     w.erase_bar.show()
+    wave = fake_wave(0.2)
+    w.waveform._buffer.clear()
+    for v in wave:
+        w.waveform._buffer.append(float(v))
+    w.waveform._intensity = 0.2
 
 
 def s_locked_out(w):
     w.fail_count = 0
-    w.mic.set_mode("fail")
-    w._set_status("THREE FAILED ATTEMPTS — SYSTEM LOCKED FOR 60 SECONDS", RED)
-    w._set_footer("LOCKED OUT")
-    w.footer.setText(w._footer_text("LOCKED OUT"))
+    w.mascot.set_mode("fail")
+    w.status_bar_widget.set_text(config.LOCKOUT_LINE,
+                                 ui_mod.QColor("#FFE0E0"))
     w.erase_bar.setValue(100)
     w.erase_bar.show()
 

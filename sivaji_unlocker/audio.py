@@ -69,6 +69,47 @@ def record_audio(seconds: float = config.RECORD_SECONDS) -> np.ndarray:
     return audio.flatten()
 
 
+def listen_until_speech(
+    silence_threshold: float = 0.015,
+    min_silence_ms: int = 300,
+    max_wait_s: float = 30.0,
+    capture_s: float = 4.0,
+    on_level=None,
+):
+    """Continuously sample the mic in small chunks. As soon as RMS exceeds
+    `silence_threshold` we treat that as speech onset and capture the next
+    `capture_s` seconds. Returns the captured audio, or None if `max_wait_s`
+    elapsed without speech.
+
+    `on_level(rms, is_voiced)` is called for each chunk so the UI can
+    visualize ambient sound and show 'detecting' state.
+    """
+    sd = _lazy_audio()
+    chunk_ms = 50
+    chunk_n = int(config.SAMPLE_RATE * chunk_ms / 1000)
+    elapsed = 0.0
+
+    with sd.InputStream(
+        samplerate=config.SAMPLE_RATE, channels=1, dtype="float32",
+        blocksize=chunk_n,
+    ) as stream:
+        while elapsed < max_wait_s:
+            buf, _ = stream.read(chunk_n)
+            chunk = buf.flatten()
+            rms = float(np.sqrt(np.mean(chunk ** 2) + 1e-12))
+            voiced = rms > silence_threshold
+            if on_level is not None:
+                on_level(rms, voiced)
+            if voiced:
+                # Capture the next capture_s of audio (including this chunk).
+                tail_n = int(capture_s * config.SAMPLE_RATE) - chunk_n
+                tail_buf, _ = stream.read(tail_n)
+                full = np.concatenate([chunk, tail_buf.flatten()])
+                return full
+            elapsed += chunk_ms / 1000.0
+    return None
+
+
 def embed(audio: np.ndarray) -> np.ndarray:
     """Convert raw audio into a 256-dim speaker embedding."""
     _, preprocess_wav = _lazy_resemblyzer()

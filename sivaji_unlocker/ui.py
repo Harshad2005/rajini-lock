@@ -1,34 +1,34 @@
 """Sivaji-style fullscreen voice-recognition UI — recreated to match the
-2007 film's laptop scene shot-by-shot:
+9:37–9:47 sequence from the 2007 film:
 
-  • Pure-black background with electric-blue/cyan accent
-  • Big bold "BOSS" branding + "VOICE RECOGNITION SYSTEM" title
-  • Radar-pulse microphone animation (concentric expanding rings)
-  • Live oscilloscope waveform during recording
-  • Corner-bracket targeting-reticle frame
-  • Subtle CRT scanline overlay
-  • ACCESS GRANTED (green flash) / ACCESS DENIED (red flash) sequences
-  • DATA ERASURE animation with progress bar after 3 failed attempts
+  • Dark crimson background with glowing red curved 'arena' tracks
+  • Bright electric-blue baseline ribbon running across the mid-screen
+  • White scrolling oscilloscope waveform when speaking
+  • Centered red status bar with segmented dark blocks on each side,
+    showing lowercase 'processing' → 'voice recognised' / 'voice not recognised'
+  • Stylized 'buddy' mascot silhouette on the left, holding a red mic prop
+  • No mouse cursor, no buttons — always-listening VAD
+  • 3-fail data-erasure animation, then 60s lockout
 """
 from __future__ import annotations
 
 import logging
 import math
+import random
 import sys
 import time
-from dataclasses import dataclass
+from collections import deque
 
 import numpy as np
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QRectF, QPropertyAnimation,
-    QEasingCurve, pyqtProperty, QPointF,
+    Qt, QTimer, QThread, pyqtSignal, QRectF, QPointF,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QGuiApplication, QKeyEvent, QPainter, QPen, QBrush,
-    QPainterPath, QRadialGradient, QLinearGradient, QFontMetrics,
+    QPainterPath, QRadialGradient, QLinearGradient,
 )
 from PyQt6.QtWidgets import (
-    QApplication, QLabel, QMainWindow, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget,
     QHBoxLayout, QGraphicsDropShadowEffect, QProgressBar,
 )
 
@@ -36,67 +36,155 @@ from . import audio, config
 
 log = logging.getLogger(__name__)
 
-# Film-accurate palette
-BG          = QColor("#000000")
-PANEL       = QColor("#050810")
-CYAN        = QColor("#00E5FF")     # primary electric blue
-CYAN_DIM    = QColor("#0090A8")
-AMBER       = QColor("#FFC000")     # secondary label color
-GREEN       = QColor("#00FF66")     # access granted
-RED         = QColor("#FF2030")     # access denied
-WHITE       = QColor("#FFFFFF")
+# Film-accurate palette (sampled directly from the 9:37–9:47 frames)
+BG_DEEP     = QColor("#1A0006")     # near-black crimson at the edges
+BG_RED      = QColor("#3A0008")     # main scene background
+RAIL_RED    = QColor("#CC1010")     # bright glowing rail/track lines
+RAIL_BLUE   = QColor("#1A1AE0")     # electric-blue accent line
+BAR_RED     = QColor("#C81A1A")     # status bar fill
+BAR_DARK    = QColor("#6A0808")     # segmented "off" blocks on the bar
+BAR_BORDER  = QColor("#FF4040")     # bar top highlight
+TEXT_CYAN   = QColor("#5BB0C0")     # 'processing' text — muted teal
+TEXT_WHITE  = QColor("#F0F0F0")     # 'voice recognised' text
+WAVE_WHITE  = QColor("#E8E8E8")     # waveform line
+WAVE_BLUE   = QColor("#3030D0")     # baseline behind waveform
+GREEN_OK    = QColor("#3FE07A")     # subtle granted accent
+BLACK       = QColor("#000000")
 
 
 # ────────────────────────────────────────────────────────────── Worker thread
 
-class VerifyWorker(QThread):
-    """Records audio + runs speaker verification off the UI thread."""
-    finished_ok   = pyqtSignal(float)
-    finished_fail = pyqtSignal(float)
-    error         = pyqtSignal(str)
-    waveform      = pyqtSignal(object)  # np.ndarray of recorded samples
+class ListenWorker(QThread):
+    """Continuously listens to the mic and fires verification when speech
+    is detected. Always-on, no button required — like the film."""
+    speech_detected = pyqtSignal()                 # voice activity detected
+    ambient_level   = pyqtSignal(float, bool)      # rms, is_voiced
+    waveform        = pyqtSignal(object)           # captured np.ndarray
+    finished_ok     = pyqtSignal(float)
+    finished_fail   = pyqtSignal(float)
+    error           = pyqtSignal(str)
 
     def __init__(self, voiceprint: np.ndarray):
         super().__init__()
         self.voiceprint = voiceprint
+        self._stop = False
+        self._paused = False
+
+    def pause(self, paused: bool = True):
+        self._paused = paused
+
+    def stop(self):
+        self._stop = True
 
     def run(self):
         try:
-            samples = audio.record_audio()
-            self.waveform.emit(samples)
-            matched, sim = audio.verify(samples, self.voiceprint)
-            (self.finished_ok if matched else self.finished_fail).emit(sim)
+            while not self._stop:
+                if self._paused:
+                    self.msleep(100)
+                    continue
+                samples = audio.listen_until_speech(
+                    on_level=lambda rms, v: self.ambient_level.emit(rms, v),
+                    max_wait_s=10.0,
+                )
+                if samples is None:
+                    continue
+                if self._paused or self._stop:
+                    continue
+                self.speech_detected.emit()
+                self.waveform.emit(samples)
+                matched, sim = audio.verify(samples, self.voiceprint)
+                (self.finished_ok if matched else self.finished_fail).emit(sim)
+                self._paused = True
         except Exception as exc:  # noqa: BLE001
-            log.exception("verify worker failed")
+            log.exception("listen worker failed")
             self.error.emit(str(exc))
 
 
-# ────────────────────────────────────────────────────── Radar-pulse mic widget
+# ─────────────────────────────────────────────── Animated arena background
 
-class RadarMicWidget(QWidget):
-    """Microphone icon with concentric radar pulses — the iconic
-    'voice listening' animation from the film."""
+class ArenaBackground(QWidget):
+    """The dark-crimson 'arena' with glowing red curved rails and a
+    bright blue baseline — straight out of the 9:37 frame."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(280, 280)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._phase = 0.0
-        self._mode = "idle"          # idle | listening | processing | ok | fail
-        self._wave: np.ndarray | None = None
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(33)  # ~30fps
+        self._timer.start(33)
+
+    def _tick(self):
+        self._phase += 0.012
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Vertical radial gradient: brighter red toward center, deeper at edges
+        grad = QRadialGradient(w / 2, h * 0.55, max(w, h) * 0.7)
+        grad.setColorAt(0.0, QColor("#5A0010"))
+        grad.setColorAt(0.5, BG_RED)
+        grad.setColorAt(1.0, BG_DEEP)
+        p.fillRect(self.rect(), QBrush(grad))
+
+        # Glowing red curved rails — 4 layered ellipses suggesting an arena
+        # The animation is subtle: the rails pulse in brightness.
+        pulse = 0.6 + 0.4 * (0.5 + 0.5 * math.sin(self._phase * 2))
+        cx, cy = w / 2, h * 0.62
+        for i, scale in enumerate([1.4, 1.15, 0.95, 0.78]):
+            rw = w * 0.85 * scale
+            rh = h * 0.55 * scale
+            alpha = int(220 * pulse * (1 - i * 0.18))
+            # Outer glow
+            for k in range(4):
+                pen = QPen(QColor(RAIL_RED.red(), RAIL_RED.green(), RAIL_RED.blue(),
+                                  max(0, alpha // (k + 2))), 8 - k * 1.5)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(QRectF(cx - rw / 2, cy - rh / 2, rw, rh))
+
+        # Electric-blue baseline ribbon across the mid-screen
+        blue_y = h * 0.55
+        ribbon_grad = QLinearGradient(0, blue_y - 8, 0, blue_y + 8)
+        ribbon_grad.setColorAt(0.0, QColor(0, 0, 0, 0))
+        ribbon_grad.setColorAt(0.5, QColor(60, 80, 240, 220))
+        ribbon_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        p.fillRect(QRectF(0, blue_y - 8, w, 16), QBrush(ribbon_grad))
+        # Bright blue line on top of ribbon
+        p.setPen(QPen(QColor(120, 160, 255, 240), 2))
+        p.drawLine(0, int(blue_y), w, int(blue_y))
+
+        # Dark vignette
+        vg = QRadialGradient(w / 2, h / 2, max(w, h) * 0.7)
+        vg.setColorAt(0.55, QColor(0, 0, 0, 0))
+        vg.setColorAt(1.0, QColor(0, 0, 0, 200))
+        p.fillRect(self.rect(), QBrush(vg))
+
+
+# ─────────────────────────────────────────────────── Buddy mascot character
+
+class BuddyMascot(QWidget):
+    """Stylized silhouette of the 'buddy' character holding a red microphone.
+    Drawn purely with paths — no external assets needed."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._phase = 0.0
+        self._mode = "idle"   # idle | listening | ok | fail
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(40)
 
     def set_mode(self, mode: str):
         self._mode = mode
         self.update()
 
-    def set_waveform(self, samples: np.ndarray):
-        self._wave = samples
-        self.update()
-
     def _tick(self):
-        self._phase += 0.04
+        self._phase += 0.06
         self.update()
 
     def paintEvent(self, _event):
@@ -104,131 +192,274 @@ class RadarMicWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
         cx, cy = w / 2, h / 2
-        radius = min(w, h) / 2 - 10
+        bob = math.sin(self._phase * 1.4) * 4
 
-        accent = {
-            "idle": CYAN_DIM,
-            "listening": CYAN,
-            "processing": CYAN,
-            "ok": GREEN,
-            "fail": RED,
-        }[self._mode]
+        body_color = QColor("#E0856B")     # warm peach skin tone
+        body_dark = QColor("#8C3F2F")
+        eye_color = QColor("#1A1A1A")
+        ear_color = QColor("#C66A52")
 
-        # ─── concentric radar pulses
-        rings = 4
-        for i in range(rings):
-            t = (self._phase + i / rings) % 1.0
-            r = radius * t
-            alpha = int(220 * (1 - t))
-            pen = QPen(QColor(accent.red(), accent.green(), accent.blue(), alpha), 2)
-            p.setPen(pen)
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawEllipse(QPointF(cx, cy), r, r)
-
-        # ─── inner solid disc
-        grad = QRadialGradient(cx, cy, radius * 0.45)
-        grad.setColorAt(0.0, QColor(accent.red(), accent.green(), accent.blue(), 80))
-        grad.setColorAt(1.0, QColor(accent.red(), accent.green(), accent.blue(), 0))
-        p.setBrush(QBrush(grad))
+        # Body / chest (rounded oval)
+        body_rect = QRectF(cx - w * 0.32, cy + bob - h * 0.05,
+                           w * 0.64, h * 0.55)
+        body_grad = QLinearGradient(0, body_rect.top(), 0, body_rect.bottom())
+        body_grad.setColorAt(0.0, QColor("#22A0A0"))   # teal shirt
+        body_grad.setColorAt(1.0, QColor("#0A6060"))
+        p.setBrush(QBrush(body_grad))
         p.setPen(Qt.PenStyle.NoPen)
-        p.drawEllipse(QPointF(cx, cy), radius * 0.45, radius * 0.45)
+        p.drawEllipse(body_rect)
 
-        # ─── microphone glyph in the center (drawn with paths, no font deps)
-        mic_w = radius * 0.20
-        mic_h = radius * 0.32
-        pen = QPen(accent, 4)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(pen)
-        p.setBrush(QBrush(QColor(accent.red(), accent.green(), accent.blue(), 60)))
-        # capsule body
-        body_rect = QRectF(cx - mic_w / 2, cy - mic_h / 2 - mic_h * 0.1,
-                           mic_w, mic_h)
-        p.drawRoundedRect(body_rect, mic_w / 2, mic_w / 2)
-        # arc cradle
-        cradle_r = mic_w * 1.1
-        cradle_rect = QRectF(cx - cradle_r, cy - cradle_r * 0.4,
-                             cradle_r * 2, cradle_r * 1.6)
-        p.drawArc(cradle_rect, 200 * 16, 140 * 16)
-        # stand
-        p.drawLine(QPointF(cx, cy + cradle_r * 0.85),
-                   QPointF(cx, cy + cradle_r * 1.25))
-        p.drawLine(QPointF(cx - mic_w * 0.6, cy + cradle_r * 1.25),
-                   QPointF(cx + mic_w * 0.6, cy + cradle_r * 1.25))
+        # Head — large, pear-shaped
+        head_rect = QRectF(cx - w * 0.28, cy + bob - h * 0.45,
+                           w * 0.56, h * 0.55)
+        head_grad = QRadialGradient(cx - w * 0.05, cy + bob - h * 0.25, w * 0.3)
+        head_grad.setColorAt(0.0, body_color)
+        head_grad.setColorAt(1.0, body_dark)
+        p.setBrush(QBrush(head_grad))
+        p.drawEllipse(head_rect)
 
-        # ─── live oscilloscope band beneath the mic when listening
-        if self._mode == "listening" and self._wave is not None:
-            band_top = cy + radius * 0.55
-            band_h = 30
-            samples = self._wave
-            n = 120
-            if len(samples) > n:
-                idx = np.linspace(0, len(samples) - 1, n).astype(int)
-                samples = samples[idx]
-            pen = QPen(accent, 2)
-            p.setPen(pen)
-            path = QPainterPath()
-            for i, v in enumerate(samples):
-                x = cx - radius * 0.6 + i * (radius * 1.2 / n)
-                y = band_top + v * band_h
-                if i == 0:
-                    path.moveTo(x, y)
-                else:
-                    path.lineTo(x, y)
-            p.drawPath(path)
+        # Snout (smaller oval lower on the face, pointing slightly left)
+        snout_rect = QRectF(cx - w * 0.33, cy + bob - h * 0.18,
+                            w * 0.32, h * 0.20)
+        p.setBrush(QBrush(body_color.lighter(110)))
+        p.drawEllipse(snout_rect)
+
+        # Ears (two pointy)
+        ear_path = QPainterPath()
+        ear_path.moveTo(cx - w * 0.18, cy + bob - h * 0.40)
+        ear_path.lineTo(cx - w * 0.05, cy + bob - h * 0.62)
+        ear_path.lineTo(cx + w * 0.06, cy + bob - h * 0.42)
+        ear_path.closeSubpath()
+        p.setBrush(QBrush(ear_color))
+        p.drawPath(ear_path)
+        ear_path2 = QPainterPath()
+        ear_path2.moveTo(cx + w * 0.16, cy + bob - h * 0.36)
+        ear_path2.lineTo(cx + w * 0.24, cy + bob - h * 0.58)
+        ear_path2.lineTo(cx + w * 0.28, cy + bob - h * 0.34)
+        ear_path2.closeSubpath()
+        p.drawPath(ear_path2)
+
+        # Eyes — large circular with reflective highlight
+        for ex in (-w * 0.10, w * 0.10):
+            ey = cy + bob - h * 0.27
+            er = w * 0.07
+            # white eye
+            p.setBrush(QBrush(QColor(240, 240, 240)))
+            p.drawEllipse(QPointF(cx + ex, ey), er, er)
+            # iris/pupil
+            p.setBrush(QBrush(eye_color))
+            p.drawEllipse(QPointF(cx + ex + er * 0.2, ey + er * 0.1),
+                          er * 0.55, er * 0.55)
+            # highlight
+            p.setBrush(QBrush(QColor(255, 255, 255, 220)))
+            p.drawEllipse(QPointF(cx + ex - er * 0.1, ey - er * 0.25),
+                          er * 0.18, er * 0.18)
+
+        # Smile (slight curve)
+        smile_pen = QPen(QColor(60, 20, 10), 4)
+        smile_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(smile_pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        smile_rect = QRectF(cx - w * 0.13, cy + bob - h * 0.10,
+                            w * 0.16, h * 0.08)
+        p.drawArc(smile_rect, 200 * 16, 140 * 16)
+
+        # Red microphone prop — held to the right, near mouth
+        mic_x, mic_y = cx + w * 0.20, cy + bob - h * 0.10
+        # Mic ball
+        ball_grad = QRadialGradient(mic_x - w * 0.02, mic_y - h * 0.02, w * 0.10)
+        ball_grad.setColorAt(0.0, QColor("#FF6060"))
+        ball_grad.setColorAt(1.0, QColor("#A00808"))
+        p.setBrush(QBrush(ball_grad))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(QPointF(mic_x, mic_y), w * 0.10, h * 0.08)
+        # Mic grille lines
+        grille_pen = QPen(QColor(60, 0, 0, 180), 1.2)
+        p.setPen(grille_pen)
+        for i in range(-3, 4):
+            p.drawLine(QPointF(mic_x - w * 0.08, mic_y + i * h * 0.014),
+                       QPointF(mic_x + w * 0.08, mic_y + i * h * 0.014))
+        # Mic handle (going down-right)
+        p.setBrush(QBrush(QColor("#3A1010")))
+        p.setPen(Qt.PenStyle.NoPen)
+        handle_path = QPainterPath()
+        handle_path.moveTo(mic_x + w * 0.04, mic_y + h * 0.06)
+        handle_path.lineTo(mic_x + w * 0.20, mic_y + h * 0.30)
+        handle_path.lineTo(mic_x + w * 0.14, mic_y + h * 0.34)
+        handle_path.lineTo(mic_x - w * 0.02, mic_y + h * 0.10)
+        handle_path.closeSubpath()
+        p.drawPath(handle_path)
+
+        # Mode-based aura around the mic
+        if self._mode == "listening":
+            aura = QColor(255, 80, 80, 180)
+        elif self._mode == "ok":
+            aura = QColor(80, 255, 120, 180)
+        elif self._mode == "fail":
+            aura = QColor(255, 40, 40, 220)
+        else:
+            aura = QColor(255, 80, 80, 80)
+        for r_idx, scale in enumerate([1.4, 1.7, 2.0]):
+            a = int(aura.alpha() * (1 - r_idx * 0.3))
+            p.setPen(QPen(QColor(aura.red(), aura.green(), aura.blue(), a), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(mic_x, mic_y),
+                          w * 0.11 * scale, h * 0.09 * scale)
 
 
-# ──────────────────────────────────────────────── Corner-bracket frame overlay
+# ───────────────────────────────────────────── Animated waveform display
 
-class FrameOverlay(QWidget):
-    """Targeting-reticle corner brackets + faint scanlines, drawn over
-    everything else."""
+class WaveformDisplay(QWidget):
+    """White scrolling oscilloscope waveform on a transparent background.
+    Draws a horizontal blue baseline behind a white jagged wave."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self._scan_phase = 0
+        self._phase = 0.0
+        self._intensity = 0.0   # 0 = idle, 1 = full speech
+        self._target_intensity = 0.0
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
-        self._timer.start(50)
+        self._timer.start(33)
+        self._buffer = deque([0.0] * 220, maxlen=220)
+
+    def set_intensity(self, value: float):
+        self._target_intensity = max(0.0, min(1.0, value))
+
+    def push_sample(self, rms: float):
+        """Push a live RMS value to scroll across the waveform."""
+        self._buffer.append(min(1.0, rms * 6.0))
 
     def _tick(self):
-        self._scan_phase = (self._scan_phase + 1) % 200
+        self._phase += 0.18
+        # Smooth toward target
+        self._intensity += (self._target_intensity - self._intensity) * 0.12
         self.update()
 
     def paintEvent(self, _event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
-        margin = 40
-        bracket = 60
+        cy = h / 2
 
-        # corner brackets
-        pen = QPen(CYAN, 3)
-        p.setPen(pen)
-        # top-left
-        p.drawLine(margin, margin, margin + bracket, margin)
-        p.drawLine(margin, margin, margin, margin + bracket)
-        # top-right
-        p.drawLine(w - margin, margin, w - margin - bracket, margin)
-        p.drawLine(w - margin, margin, w - margin, margin + bracket)
-        # bottom-left
-        p.drawLine(margin, h - margin, margin + bracket, h - margin)
-        p.drawLine(margin, h - margin, margin, h - margin - bracket)
-        # bottom-right
-        p.drawLine(w - margin, h - margin, w - margin - bracket, h - margin)
-        p.drawLine(w - margin, h - margin, w - margin, h - margin - bracket)
+        # Blue baseline (always visible)
+        p.setPen(QPen(QColor(80, 100, 240, 200), 3))
+        p.drawLine(0, int(cy), w, int(cy))
+        # Faint blue glow above/below
+        glow = QLinearGradient(0, cy - 6, 0, cy + 6)
+        glow.setColorAt(0.0, QColor(60, 80, 220, 0))
+        glow.setColorAt(0.5, QColor(60, 80, 220, 90))
+        glow.setColorAt(1.0, QColor(60, 80, 220, 0))
+        p.fillRect(QRectF(0, cy - 6, w, 12), QBrush(glow))
 
-        # scanlines — every 3 px, very low alpha
-        scan_pen = QPen(QColor(0, 229, 255, 12), 1)
-        p.setPen(scan_pen)
-        for y in range(0, h, 3):
-            p.drawLine(0, y, w, y)
+        # White jagged waveform — overlay
+        n = len(self._buffer)
+        amp = h * 0.42
+        # Use buffer values plus some sine variation for a lively look
+        path = QPainterPath()
+        path.moveTo(0, cy)
+        for i, v in enumerate(self._buffer):
+            x = i * w / max(n - 1, 1)
+            # Combine live buffer + a faster oscillation
+            wobble = math.sin(self._phase * 3 + i * 0.7) * 0.25
+            base = v if self._intensity > 0.05 else 0.04
+            y = cy - (base * (1 + wobble) * amp * (0.5 + 0.5 * self._intensity))
+            # Alternate sign for jagged scope feel
+            if i % 2 == 0:
+                y = 2 * cy - y
+            path.lineTo(x, y)
 
-        # moving bright scan band
-        band_pen = QPen(QColor(0, 229, 255, 40), 2)
-        p.setPen(band_pen)
-        sy = self._scan_phase * h // 200
-        p.drawLine(0, sy, w, sy)
+        # Subtle shadow first
+        p.setPen(QPen(QColor(255, 255, 255, 60), 4))
+        p.drawPath(path)
+        # Bright white stroke
+        p.setPen(QPen(WAVE_WHITE, 2))
+        p.drawPath(path)
+
+
+# ──────────────────────────────────────────────── Status bar (the red bar)
+
+class StatusBar(QWidget):
+    """The signature red status bar with segmented dark blocks on each side
+    and centered text. Exactly like the film's bottom bar."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._text = config.IDLE_TEXT
+        self._text_color = TEXT_CYAN
+        self._phase = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self._timer.start(80)
+        self.setMinimumHeight(80)
+
+    def set_text(self, text: str, color: QColor):
+        self._text = text
+        self._text_color = color
+        self.update()
+
+    def _tick(self):
+        self._phase += 1
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Outer bar with slight 3D bevel
+        bar_rect = QRectF(8, 8, w - 16, h - 16)
+        bar_grad = QLinearGradient(0, bar_rect.top(), 0, bar_rect.bottom())
+        bar_grad.setColorAt(0.0, BAR_BORDER)
+        bar_grad.setColorAt(0.15, BAR_RED)
+        bar_grad.setColorAt(1.0, QColor("#7A0808"))
+        p.setBrush(QBrush(bar_grad))
+        p.setPen(QPen(QColor("#FF5050"), 1.5))
+        p.drawRoundedRect(bar_rect, 4, 4)
+
+        # Vertical leading pipe on far left
+        p.setPen(QPen(QColor(255, 200, 200, 220), 2))
+        p.drawLine(QPointF(bar_rect.left() + 8, bar_rect.top() + 6),
+                   QPointF(bar_rect.left() + 8, bar_rect.bottom() - 6))
+
+        # Segmented dark blocks on left and right of the text
+        block_count = 10
+        block_h = bar_rect.height() - 18
+        block_w = (bar_rect.width() / 3.5 - 12) / block_count - 3
+        block_w = max(block_w, 10)
+        # Animation: a "loader" effect where one block is brighter
+        active_idx = int(self._phase / 2) % block_count
+
+        # Left segments
+        left_x0 = bar_rect.left() + 22
+        for i in range(block_count):
+            x = left_x0 + i * (block_w + 3)
+            y = bar_rect.top() + 9
+            is_active = i == active_idx
+            color = QColor("#FF8080") if is_active else BAR_DARK
+            p.setBrush(QBrush(color))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRect(QRectF(x, y, block_w, block_h))
+
+        # Right segments (mirror)
+        right_x0 = bar_rect.right() - 22 - block_count * (block_w + 3) + 3
+        for i in range(block_count):
+            x = right_x0 + i * (block_w + 3)
+            y = bar_rect.top() + 9
+            is_active = (block_count - 1 - i) == active_idx
+            color = QColor("#FF8080") if is_active else BAR_DARK
+            p.setBrush(QBrush(color))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRect(QRectF(x, y, block_w, block_h))
+
+        # Center text
+        font = QFont("Verdana", int(h * 0.34))
+        font.setBold(True)
+        font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 105)
+        p.setFont(font)
+        p.setPen(QPen(self._text_color))
+        p.drawText(bar_rect, Qt.AlignmentFlag.AlignCenter, self._text)
 
 
 # ───────────────────────────────────────────────────────── Main lock window
@@ -244,10 +475,12 @@ class LockWindow(QMainWindow):
 
         self.fail_count = 0
         self.locked_until = 0.0
-        self.worker: VerifyWorker | None = None
+        self.worker: ListenWorker | None = None
 
         self._build_ui()
         self._make_fullscreen()
+        self._hide_cursor()
+        self._start_listener()
         self._clock_timer = QTimer(self)
         self._clock_timer.timeout.connect(self._tick_clock)
         self._clock_timer.start(500)
@@ -255,134 +488,102 @@ class LockWindow(QMainWindow):
     # ─────────────────────────────────────────────────────────────────── UI
 
     def _build_ui(self):
-        self.setStyleSheet(f"background: {BG.name()};")
+        self.setStyleSheet(f"background: {BG_DEEP.name()};")
         central = QWidget()
-        central.setStyleSheet(f"background: {BG.name()};")
+        central.setStyleSheet(f"background: {BG_DEEP.name()};")
         self.setCentralWidget(central)
 
+        # Stacked layout: arena bg fills the window; foreground holds widgets
+        self.bg = ArenaBackground(central)
+
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(120, 80, 120, 80)
-        outer.setSpacing(14)
+        outer.setContentsMargins(60, 40, 60, 40)
+        outer.setSpacing(0)
 
-        # ── Top status bar
-        top = QHBoxLayout()
-        self.sys_label = QLabel("◈ BOSS BIOSEC v3.14 ◈ THINKPAD X41 ◈ INDIA")
-        self.sys_label.setStyleSheet(self._mono(CYAN_DIM, 14, 4))
-        self.clock_label = QLabel("")
-        self.clock_label.setStyleSheet(self._mono(CYAN_DIM, 14, 2))
-        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        top.addWidget(self.sys_label)
-        top.addStretch()
-        top.addWidget(self.clock_label)
-        outer.addLayout(top)
-
-        outer.addStretch(1)
-
-        # ── BOSS brand
+        # ── Top corner labels: BOSS brand + clock
+        top_row = QHBoxLayout()
         self.brand = QLabel(config.BRAND_TEXT)
-        self.brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        brand_font = QFont("Helvetica", 180, QFont.Weight.Black)
+        brand_font = QFont("Helvetica", 28, QFont.Weight.Black)
         self.brand.setFont(brand_font)
         self.brand.setStyleSheet(
-            f"color: {CYAN.name()}; letter-spacing: 40px;"
+            f"color: rgba(255, 220, 220, 220); letter-spacing: 8px;"
+            "background: transparent;"
         )
         glow = QGraphicsDropShadowEffect()
-        glow.setColor(CYAN); glow.setBlurRadius(80); glow.setOffset(0, 0)
+        glow.setColor(QColor(255, 60, 60))
+        glow.setBlurRadius(40); glow.setOffset(0, 0)
         self.brand.setGraphicsEffect(glow)
-        outer.addWidget(self.brand)
 
-        # ── Title + subtitle
-        self.title = QLabel(config.TITLE_TEXT)
-        self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.title.setStyleSheet(self._mono(WHITE, 22, 10, bold=True))
-        outer.addWidget(self.title)
+        self.clock_label = QLabel("")
+        self.clock_label.setStyleSheet(
+            "color: rgba(255,200,200,200); font-family: 'Verdana','sans-serif';"
+            "font-size: 14px; letter-spacing: 2px; background: transparent;"
+        )
+        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight |
+                                     Qt.AlignmentFlag.AlignVCenter)
+        top_row.addWidget(self.brand)
+        top_row.addStretch()
+        top_row.addWidget(self.clock_label)
+        outer.addLayout(top_row)
 
-        self.subtitle = QLabel(config.SUBTITLE_TEXT)
-        self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.subtitle.setStyleSheet(self._mono(AMBER, 13, 6))
-        outer.addWidget(self.subtitle)
+        # ── Main row: buddy mascot on left, waveform on right
+        mid = QHBoxLayout()
+        mid.setContentsMargins(0, 0, 0, 0)
 
-        outer.addSpacing(20)
+        self.mascot = BuddyMascot()
+        self.mascot.setMinimumSize(360, 480)
 
-        # ── Radar mic
-        mic_row = QHBoxLayout()
-        mic_row.addStretch()
-        self.mic = RadarMicWidget()
-        mic_row.addWidget(self.mic)
-        mic_row.addStretch()
-        outer.addLayout(mic_row)
+        right_col = QVBoxLayout()
+        right_col.addStretch(1)
+        self.waveform = WaveformDisplay()
+        self.waveform.setMinimumSize(620, 240)
+        right_col.addWidget(self.waveform)
+        right_col.addStretch(2)
 
-        # ── Status line (PROMPT / LISTENING / PROCESSING / GRANTED / DENIED)
-        self.status = QLabel(config.PROMPT_TEXT)
-        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.status.setStyleSheet(self._mono(CYAN, 24, 8, bold=True))
-        outer.addWidget(self.status)
+        mid.addStretch(1)
+        mid.addWidget(self.mascot, 0)
+        mid.addSpacing(20)
+        mid.addLayout(right_col, 1)
+        mid.addStretch(1)
+        outer.addLayout(mid, 1)
 
-        # ── Erasure progress bar (hidden until needed)
+        # ── Passphrase hint (small line above status bar)
+        self.hint = QLabel(f"\u201c{config.PASSPHRASE_HINT}\u201d")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.hint.setStyleSheet(
+            "color: rgba(255, 220, 200, 180); font-family: 'Verdana','sans-serif';"
+            "font-size: 18px; font-style: italic; letter-spacing: 2px;"
+            "background: transparent;"
+        )
+        outer.addWidget(self.hint)
+        outer.addSpacing(12)
+
+        # ── Status bar (the iconic red bar)
+        self.status_bar_widget = StatusBar()
+        self.status_bar_widget.setFixedHeight(70)
+        outer.addWidget(self.status_bar_widget)
+        outer.addSpacing(8)
+
+        # ── Erasure progress bar (hidden until needed) — dark with red fill
         self.erase_bar = QProgressBar()
         self.erase_bar.setRange(0, 100)
         self.erase_bar.setValue(0)
         self.erase_bar.setTextVisible(True)
-        self.erase_bar.setFormat("%p%  —  ERASING")
+        self.erase_bar.setFormat("erasing data %p%")
         self.erase_bar.setStyleSheet(f"""
             QProgressBar {{
-                background: {PANEL.name()};
-                border: 2px solid {RED.name()};
-                color: {WHITE.name()};
-                font-family: 'Menlo','Courier New',monospace;
+                background: #1A0006;
+                border: 2px solid {RAIL_RED.name()};
+                color: #FFFFFF;
+                font-family: 'Verdana','sans-serif';
                 font-size: 14px; font-weight: bold;
-                text-align: center; height: 28px;
+                text-align: center; height: 24px;
                 letter-spacing: 4px;
             }}
-            QProgressBar::chunk {{ background: {RED.name()}; }}
+            QProgressBar::chunk {{ background: {RAIL_RED.name()}; }}
         """)
         self.erase_bar.hide()
         outer.addWidget(self.erase_bar)
-
-        # ── Speak button
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
-        self.speak_btn = QPushButton("◉  PRESS TO SPEAK  ◉")
-        self.speak_btn.setFixedSize(440, 70)
-        self.speak_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.speak_btn.setStyleSheet(f"""
-            QPushButton {{
-                background: {PANEL.name()};
-                color: {CYAN.name()};
-                border: 2px solid {CYAN.name()};
-                font-family: 'Menlo','Courier New',monospace;
-                font-size: 20px; font-weight: bold;
-                letter-spacing: 6px;
-            }}
-            QPushButton:hover {{
-                background: {CYAN.name()}; color: {BG.name()};
-            }}
-            QPushButton:disabled {{
-                color: {CYAN_DIM.name()}; border-color: {CYAN_DIM.name()};
-            }}
-        """)
-        self.speak_btn.clicked.connect(self._start_unlock)
-        btn_row.addWidget(self.speak_btn)
-        btn_row.addStretch()
-        outer.addLayout(btn_row)
-
-        outer.addStretch(2)
-
-        # ── Footer status readout
-        self.footer = QLabel(self._footer_text("READY"))
-        self.footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.footer.setStyleSheet(self._mono(CYAN_DIM, 13, 4))
-        outer.addWidget(self.footer)
-
-        # ── Frame overlay (corner brackets + scanlines)
-        self.overlay = FrameOverlay(self)
-        self.overlay.lower()
-        self.overlay.raise_()
-
-    def _mono(self, color: QColor, size: int, spacing: int, bold: bool = False):
-        weight = "bold" if bold else "normal"
-        return (f"color: {color.name()}; font-family: 'Menlo','Courier New',monospace;"
-                f"font-size: {size}px; letter-spacing: {spacing}px; font-weight: {weight};")
 
     def _make_fullscreen(self):
         self.setWindowFlags(
@@ -393,88 +594,89 @@ class LockWindow(QMainWindow):
         self.setGeometry(screen)
         self.showFullScreen()
 
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        if hasattr(self, "overlay"):
-            self.overlay.setGeometry(self.rect())
+    def _hide_cursor(self):
+        QApplication.setOverrideCursor(Qt.CursorShape.BlankCursor)
 
-    # ──────────────────────────────────────────────────────────── Behavior
-
-    def _footer_text(self, status: str) -> str:
-        return (f"AUTH: VOICEPRINT-256  ◆  ATTEMPTS: {self.fail_count}/{config.MAX_ATTEMPTS}"
-                f"  ◆  STATUS: {status}")
-
-    def _tick_clock(self):
-        from datetime import datetime
-        self.clock_label.setText(datetime.now().strftime("%a %d %b %Y  %H:%M:%S"))
-
-    def _set_status(self, text: str, color: QColor):
-        self.status.setText(text)
-        self.status.setStyleSheet(self._mono(color, 24, 8, bold=True))
-
-    def _set_footer(self, status: str):
-        self.footer.setText(self._footer_text(status))
-
-    def _start_unlock(self):
-        if time.time() < self.locked_until:
-            remaining = int(self.locked_until - time.time())
-            self._set_status(f"LOCKED OUT — WAIT {remaining}s", RED)
-            return
-
-        self.speak_btn.setEnabled(False)
-        self.mic.set_mode("listening")
-        self._set_status(config.LISTENING_TEXT, CYAN)
-        self._set_footer("RECORDING")
-
-        self.worker = VerifyWorker(self.voiceprint)
-        self.worker.waveform.connect(self.mic.set_waveform)
-        self.worker.waveform.connect(lambda _s: (
-            self.mic.set_mode("processing"),
-            self._set_status(config.PROCESSING_TEXT, CYAN),
-            self._set_footer("ANALYZING"),
-        ))
+    def _start_listener(self):
+        self.worker = ListenWorker(self.voiceprint)
+        self.worker.ambient_level.connect(self._on_ambient)
+        self.worker.speech_detected.connect(self._on_speech_detected)
+        self.worker.waveform.connect(self._on_waveform_arrived)
         self.worker.finished_ok.connect(self._on_success)
         self.worker.finished_fail.connect(self._on_fail)
         self.worker.error.connect(self._on_error)
         self.worker.start()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "bg"):
+            self.bg.setGeometry(self.rect())
+            self.bg.lower()
+
+    # ──────────────────────────────────────────────────────────── Behavior
+
+    def _tick_clock(self):
+        from datetime import datetime
+        self.clock_label.setText(datetime.now().strftime("%a %d %b  %H:%M:%S"))
+
+    def _on_ambient(self, rms: float, voiced: bool):
+        if time.time() < self.locked_until:
+            return
+        self.waveform.push_sample(rms)
+        if voiced and self.status_bar_widget._text == config.IDLE_TEXT:
+            # Subtle handoff: enter listening mode on first sound
+            self.status_bar_widget.set_text(config.LISTENING_TEXT, TEXT_CYAN)
+            self.waveform.set_intensity(0.6)
+
+    def _on_speech_detected(self):
+        if time.time() < self.locked_until:
+            return
+        self.mascot.set_mode("listening")
+        self.status_bar_widget.set_text(config.PROCESSING_TEXT, TEXT_CYAN)
+        self.waveform.set_intensity(1.0)
+
+    def _on_waveform_arrived(self, samples):
+        # Push the captured samples into the live waveform buffer for a
+        # moment so it visibly reacts to the user's actual voice.
+        if samples is None or len(samples) == 0:
+            return
+        n = 220
+        idx = np.linspace(0, len(samples) - 1, n).astype(int)
+        sub = np.abs(samples[idx])
+        for v in sub:
+            self.waveform.push_sample(float(v))
+
     def _on_success(self, sim: float):
-        self.mic.set_mode("ok")
-        self._set_status(f"{config.SUCCESS_TEXT} — MATCH {sim*100:.1f}%", GREEN)
-        self._set_footer("UNLOCKED")
+        self.mascot.set_mode("ok")
+        self.status_bar_widget.set_text(config.SUCCESS_TEXT, TEXT_WHITE)
+        self.waveform.set_intensity(0.4)
         log.info("Unlocked. similarity=%.3f", sim)
+        if self.worker:
+            self.worker.stop()
         QTimer.singleShot(1800, QApplication.quit)
 
     def _on_fail(self, sim: float):
-        import random
-        self.mic.set_mode("fail")
+        self.mascot.set_mode("fail")
         self.fail_count += 1
-
         line = random.choice(config.MOCK_LINES)
-        self._set_status(f"{config.DENIED_TEXT} — {line} ({sim*100:.1f}%)", RED)
-        self._set_footer("FAILED")
+        self.status_bar_widget.set_text(line, QColor("#FFE0E0"))
 
         if self.fail_count >= config.MAX_ATTEMPTS:
             self._trigger_erasure()
             return
 
         # Re-arm after a beat
-        QTimer.singleShot(1500, lambda: (
-            self.mic.set_mode("idle"),
-            self._set_status(config.PROMPT_TEXT, CYAN),
-            self._set_footer("READY"),
-            self.speak_btn.setEnabled(True),
+        QTimer.singleShot(2200, lambda: (
+            self.mascot.set_mode("idle"),
+            self.status_bar_widget.set_text(config.IDLE_TEXT, TEXT_CYAN),
+            self.waveform.set_intensity(0.0),
+            self.worker and self.worker.pause(False),
         ))
 
     def _trigger_erasure(self):
-        """The film's iconic 3-strike data wipe (visual only — no real
-        deletion happens). After the animation, we lock out for 60s."""
-        self._set_status(config.ERASURE_TEXT, RED)
-        self._set_footer("DATA ERASURE")
+        self.status_bar_widget.set_text(config.ERASURE_TEXT, QColor("#FFE0E0"))
         self.erase_bar.setValue(0)
         self.erase_bar.show()
-        self.speak_btn.setEnabled(False)
-
         self._erase_pct = 0
         self._erase_timer = QTimer(self)
         self._erase_timer.timeout.connect(self._erase_step)
@@ -485,29 +687,30 @@ class LockWindow(QMainWindow):
         self.erase_bar.setValue(self._erase_pct)
         if self._erase_pct >= 100:
             self._erase_timer.stop()
-            self._set_status(config.LOCKOUT_LINE, RED)
+            self.status_bar_widget.set_text(config.LOCKOUT_LINE,
+                                            QColor("#FFE0E0"))
             self.locked_until = time.time() + config.LOCKOUT_SECONDS
-            QTimer.singleShot(config.LOCKOUT_SECONDS * 1000, self._reset_after_lockout)
+            QTimer.singleShot(config.LOCKOUT_SECONDS * 1000,
+                              self._reset_after_lockout)
 
     def _reset_after_lockout(self):
         self.fail_count = 0
         self.erase_bar.hide()
-        self.mic.set_mode("idle")
-        self._set_status(config.PROMPT_TEXT, CYAN)
-        self._set_footer("READY")
-        self.speak_btn.setEnabled(True)
+        self.mascot.set_mode("idle")
+        self.status_bar_widget.set_text(config.IDLE_TEXT, TEXT_CYAN)
+        if self.worker:
+            self.worker.pause(False)
 
     def _on_error(self, msg: str):
-        self.mic.set_mode("fail")
-        self._set_status(f"ERROR: {msg.upper()}", RED)
-        self.speak_btn.setEnabled(True)
+        self.mascot.set_mode("fail")
+        self.status_bar_widget.set_text(f"error: {msg.lower()}",
+                                        QColor("#FFE0E0"))
 
     # ────────────────────────────────────────────────── Hard-block escapes
 
     def keyPressEvent(self, event: QKeyEvent):
-        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self._start_unlock()
-        # swallow everything else (no Cmd-Q, ESC, etc.)
+        # Voice-only — keyboard does nothing.
+        pass
 
     def closeEvent(self, event):
         if not getattr(self, "_allow_close", False):
@@ -541,7 +744,14 @@ def run_lock_app():
         return 2
 
     win._allow_close = False
-    app.aboutToQuit.connect(lambda: setattr(win, "_allow_close", True))
+
+    def _on_quit():
+        setattr(win, "_allow_close", True)
+        QApplication.restoreOverrideCursor()
+        if win.worker:
+            win.worker.stop()
+
+    app.aboutToQuit.connect(_on_quit)
     return app.exec()
 
 

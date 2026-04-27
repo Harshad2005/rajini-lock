@@ -27,26 +27,26 @@ SIMILARITY_THRESHOLD = 0.75
 MAX_ATTEMPTS = 3
 LOCKOUT_SECONDS = 60
 
-# On-screen text — straight from the film
-TITLE_TEXT = "VOICE RECOGNITION SYSTEM"
-SUBTITLE_TEXT = "SIVAJI FOUNDATION  ◆  AUTHORIZED ACCESS ONLY"
+# On-screen text — film-accurate (Sivaji 9:37–9:47 clip)
+# The bar shows lowercase "processing" → "voice recognised" — exactly like the film.
+PASSPHRASE_HINT = "Hi, I am Sivaji, buddy"
+IDLE_TEXT       = "say the phrase"
+LISTENING_TEXT  = "listening"
+PROCESSING_TEXT = "processing"
+SUCCESS_TEXT    = "voice recognised"
+DENIED_TEXT     = "voice not recognised"
+ERASURE_TEXT    = "erasing data"
+
+# Brand text (small, in corner)
 BRAND_TEXT = "BOSS"
-PROMPT_TEXT = "PLEASE SPEAK THE PASSWORD"
-LISTENING_TEXT = "◉ LISTENING ◉"
-PROCESSING_TEXT = "ANALYZING VOICEPRINT..."
-SUCCESS_TEXT = "ACCESS GRANTED"
-DENIED_TEXT = "ACCESS DENIED"
-ERASURE_TEXT = "ERASING ALL DATA"
 
 # Mock lines after a failed attempt — Vivek-style sass + film references
 MOCK_LINES = [
-    "VOICE NOT RECOGNIZED. NICE TRY, BUDDY.",
-    "MIMICRY DETECTED. MGR-um naan-illa, SIVAJI-um naan-illa.",
-    "NEGATIVE MATCH. THE BOSS DOES NOT APPROVE.",
-    "AUTHENTICATION FAILED. THIS IS NOT SIVAJI.",
-    "WRONG VOICE. SIVAJI-kku apparam yevan da?",
+    "voice not recognised. nice try, buddy.",
+    "mimicry detected. mgr-um naan-illa, sivaji-um naan-illa.",
+    "negative match. the boss does not approve.",
+    "authentication failed. this is not sivaji.",
+    "wrong voice. sivaji-kku apparam yevan da?",
 ]
 
-LOCKOUT_LINE = (
-    "THREE FAILED ATTEMPTS — SYSTEM LOCKED FOR 60 SECONDS"
-)
+LOCKOUT_LINE = "three failed attempts — locked for 60s"
