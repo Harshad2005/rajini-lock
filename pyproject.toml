@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rajini-lock"
+version = "1.0.0"
+description = "Voice-authenticated macOS lock screen inspired by Sivaji: The Boss (2007)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Harshad Mahajan" }]
+keywords = ["macos", "voice", "lock-screen", "biometric", "rajinikanth", "sivaji", "fun"]
+classifiers = [
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+    "PyQt6>=6.6",
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    "resemblyzer>=0.1.4",
+    "torch>=2.0",
+    "librosa>=0.10",
+]
+
+[project.scripts]
+rajini-lock   = "sivaji_unlocker.ui:run_lock_app"
+rajini-enroll = "sivaji_unlocker.enroll:main"
+rajini-disable = "sivaji_unlocker.cli:disable"
+rajini-enable = "sivaji_unlocker.cli:enable"
+
+[project.urls]
+Homepage = "https://github.com/harshadmahajan63/rajini-lock"
+Repository = "https://github.com/harshadmahajan63/rajini-lock"
+
+[tool.setuptools.packages.find]
+include = ["sivaji_unlocker*"]

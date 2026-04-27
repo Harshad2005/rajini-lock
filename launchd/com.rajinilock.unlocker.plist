@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rajinilock.unlocker</string>
+
+    <!-- Run at login as the GUI user (not root) so we have mic + display access -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- LSUIElement keeps it off the Dock -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__INSTALL_DIR__/run_lock.sh</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>__APP_SUPPORT__/launch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__APP_SUPPORT__/launch.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>__INSTALL_DIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>
