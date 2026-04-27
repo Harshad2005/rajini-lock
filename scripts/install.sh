@@ -81,12 +81,20 @@ mkdir -p "$APP_SUPPORT" "$INSTALL_DIR" "$LAUNCHAGENTS"
 info "Copying app to $INSTALL_DIR ..."
 rsync -a --delete \
     --exclude '.git' --exclude '__pycache__' --exclude '*.pyc' \
-    --exclude 'demo' --exclude 'docs' \
+    --exclude 'demo' --exclude 'docs' --exclude 'venv' \
     "$REPO_DIR/" "$INSTALL_DIR/"
 ok "Source installed"
 
-# ── Create venv
-if [[ ! -d "$INSTALL_DIR/venv" ]]; then
+# ── Create venv (recreate if pip is missing or corrupted)
+VENV_OK=0
+if [[ -x "$INSTALL_DIR/venv/bin/python" ]] && "$INSTALL_DIR/venv/bin/python" -m pip --version >/dev/null 2>&1; then
+  VENV_OK=1
+fi
+if [[ "$VENV_OK" != "1" ]]; then
+  if [[ -d "$INSTALL_DIR/venv" ]]; then
+    warn "Existing venv looks broken \u2014 recreating"
+    rm -rf "$INSTALL_DIR/venv"
+  fi
   info "Creating virtualenv ..."
   # Try venv first; fall back to virtualenv (avoids ensurepip bugs on some
   # Homebrew Python installs).
