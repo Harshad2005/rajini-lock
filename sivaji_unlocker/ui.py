@@ -507,7 +507,15 @@ class LockWindow(QMainWindow):
         self.media_player.setVideoOutput(self.video_widget)
         self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
 
-        bg_path = Path(__file__).resolve().parent.parent / "assets" / "lock_background.mp4"
+        # Look for the bundled video in two places:
+        #   1. Inside the package (sivaji_unlocker/assets/) — always works when pip-installed
+        #   2. Repo-relative ../assets/ — works when running from source
+        pkg_dir = Path(__file__).resolve().parent
+        candidates = [
+            pkg_dir / "assets" / "lock_background.mp4",
+            pkg_dir.parent / "assets" / "lock_background.mp4",
+        ]
+        bg_path = next((p for p in candidates if p.exists()), candidates[0])
         if not bg_path.exists():
             # Fallback to old hand-drawn arena if the asset is missing
             log.warning("lock_background.mp4 not found at %s — using arena fallback", bg_path)
