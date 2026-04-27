@@ -29,7 +29,7 @@ LOCKOUT_SECONDS = 60
 
 # On-screen text — film-accurate (Sivaji 9:37–9:47 clip)
 # The bar shows lowercase "processing" → "voice recognised" — exactly like the film.
-PASSPHRASE_HINT = "Hi, I am Sivaji, buddy"
+PASSPHRASE_HINT = "Hi, I am Harshad, buddy"
 IDLE_TEXT       = "say the phrase"
 LISTENING_TEXT  = "listening"
 PROCESSING_TEXT = "processing"

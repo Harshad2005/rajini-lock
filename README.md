@@ -4,7 +4,7 @@
 
 ### A voice-authenticated lock screen for macOS, recreated shot-for-shot from **Sivaji: The Boss (2007)**
 
-> *"Hi, I'm Sivaji buddy, cool!"*
+> *"Hi, I am Harshad, buddy."*
 >
 > — Rajinikanth, getting into his laptop the way nature intended
 
@@ -77,7 +77,7 @@ We use [**Resemblyzer**](https://github.com/resemble-ai/Resemblyzer) — a 256-d
 
 This is **speaker verification, not speech recognition** — the words don't matter, only your voice does. So:
 
-- ✅ "Hi I'm Sivaji buddy cool" → unlocks
+- ✅ "Hi, I am Harshad, buddy" (in your voice) → unlocks
 - ✅ "Pizza Friday" → unlocks (it's still you)
 - ❌ Friend doing their best Rajini impression → denied
 - ❌ A clip of you played from someone else's iPhone speaker → usually denied (the encoder is sensitive to channel artifacts, but it's not anti-spoof — see [Limitations](#-limitations))
