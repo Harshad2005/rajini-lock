@@ -20,16 +20,20 @@ import time
 from collections import deque
 
 import numpy as np
+from pathlib import Path
+
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QRectF, QPointF,
+    Qt, QTimer, QThread, pyqtSignal, QRectF, QPointF, QUrl,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QGuiApplication, QKeyEvent, QPainter, QPen, QBrush,
     QPainterPath, QRadialGradient, QLinearGradient,
 )
+from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
     QApplication, QLabel, QMainWindow, QVBoxLayout, QWidget,
-    QHBoxLayout, QGraphicsDropShadowEffect, QProgressBar,
+    QHBoxLayout, QGraphicsDropShadowEffect, QProgressBar, QStackedLayout,
 )
 
 from . import audio, config
@@ -493,78 +497,95 @@ class LockWindow(QMainWindow):
         central.setStyleSheet(f"background: {BG_DEEP.name()};")
         self.setCentralWidget(central)
 
-        # Stacked layout: arena bg fills the window; foreground holds widgets
-        self.bg = ArenaBackground(central)
+        # ── Layer 1: video background (fills the whole window)
+        self.video_widget = QVideoWidget(central)
+        self.video_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.media_player = QMediaPlayer(self)
+        self.audio_out = QAudioOutput(self)
+        self.audio_out.setMuted(True)  # video is silent — we don't want audio
+        self.media_player.setAudioOutput(self.audio_out)
+        self.media_player.setVideoOutput(self.video_widget)
+        self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
 
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(60, 40, 60, 40)
+        bg_path = Path(__file__).resolve().parent.parent / "assets" / "lock_background.mp4"
+        if not bg_path.exists():
+            # Fallback to old hand-drawn arena if the asset is missing
+            log.warning("lock_background.mp4 not found at %s — using arena fallback", bg_path)
+            self.video_widget.hide()
+            self.bg = ArenaBackground(central)
+        else:
+            self.media_player.setSource(QUrl.fromLocalFile(str(bg_path)))
+            self.media_player.play()
+            self.bg = None
+
+        # ── Layer 2: foreground UI overlay (transparent panel)
+        self.overlay = QWidget(central)
+        self.overlay.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.overlay.setStyleSheet("background: transparent;")
+
+        outer = QVBoxLayout(self.overlay)
+        # Top/sides padded; bottom flush so our status bar lines up with the
+        # film's bar position and fully covers it.
+        outer.setContentsMargins(60, 40, 60, 0)
         outer.setSpacing(0)
 
-        # ── Top corner labels: BOSS brand + clock
+        # Top corner labels: BOSS brand + clock
         top_row = QHBoxLayout()
         self.brand = QLabel(config.BRAND_TEXT)
         brand_font = QFont("Helvetica", 28, QFont.Weight.Black)
         self.brand.setFont(brand_font)
         self.brand.setStyleSheet(
-            f"color: rgba(255, 220, 220, 220); letter-spacing: 8px;"
+            "color: rgba(255, 240, 240, 230); letter-spacing: 8px;"
             "background: transparent;"
         )
         glow = QGraphicsDropShadowEffect()
-        glow.setColor(QColor(255, 60, 60))
-        glow.setBlurRadius(40); glow.setOffset(0, 0)
+        glow.setColor(QColor(0, 0, 0, 220))
+        glow.setBlurRadius(20); glow.setOffset(2, 2)
         self.brand.setGraphicsEffect(glow)
 
         self.clock_label = QLabel("")
         self.clock_label.setStyleSheet(
-            "color: rgba(255,200,200,200); font-family: 'Verdana','sans-serif';"
+            "color: rgba(255,230,230,230); font-family: 'Verdana','sans-serif';"
             "font-size: 14px; letter-spacing: 2px; background: transparent;"
         )
         self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight |
-                                     Qt.AlignmentFlag.AlignVCenter)
+                                      Qt.AlignmentFlag.AlignVCenter)
+        clock_glow = QGraphicsDropShadowEffect()
+        clock_glow.setColor(QColor(0, 0, 0, 220))
+        clock_glow.setBlurRadius(8); clock_glow.setOffset(1, 1)
+        self.clock_label.setGraphicsEffect(clock_glow)
+
         top_row.addWidget(self.brand)
         top_row.addStretch()
         top_row.addWidget(self.clock_label)
         outer.addLayout(top_row)
 
-        # ── Main row: buddy mascot on left, waveform on right
-        mid = QHBoxLayout()
-        mid.setContentsMargins(0, 0, 0, 0)
+        # Spacer — let the video show through the middle
+        outer.addStretch(1)
 
-        self.mascot = BuddyMascot()
-        self.mascot.setMinimumSize(360, 480)
-
-        right_col = QVBoxLayout()
-        right_col.addStretch(1)
-        self.waveform = WaveformDisplay()
-        self.waveform.setMinimumSize(620, 240)
-        right_col.addWidget(self.waveform)
-        right_col.addStretch(2)
-
-        mid.addStretch(1)
-        mid.addWidget(self.mascot, 0)
-        mid.addSpacing(20)
-        mid.addLayout(right_col, 1)
-        mid.addStretch(1)
-        outer.addLayout(mid, 1)
-
-        # ── Passphrase hint (small line above status bar)
+        # Passphrase hint (small line above status bar) — drawn on a translucent strip
         self.hint = QLabel(f"\u201c{config.PASSPHRASE_HINT}\u201d")
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint.setStyleSheet(
-            "color: rgba(255, 220, 200, 180); font-family: 'Verdana','sans-serif';"
-            "font-size: 18px; font-style: italic; letter-spacing: 2px;"
-            "background: transparent;"
+            "color: rgba(255, 240, 220, 240); font-family: 'Verdana','sans-serif';"
+            "font-size: 20px; font-style: italic; letter-spacing: 3px;"
+            "background: rgba(0, 0, 0, 130); padding: 8px 24px;"
         )
+        hint_glow = QGraphicsDropShadowEffect()
+        hint_glow.setColor(QColor(0, 0, 0, 240))
+        hint_glow.setBlurRadius(16); hint_glow.setOffset(2, 2)
+        self.hint.setGraphicsEffect(hint_glow)
         outer.addWidget(self.hint)
         outer.addSpacing(12)
 
-        # ── Status bar (the iconic red bar)
+        # Status bar (the iconic red bar) — sits at the very bottom and fully
+        # covers whatever bar is in the source video. Sized large to ensure
+        # full coverage even if the screen is tall.
         self.status_bar_widget = StatusBar()
-        self.status_bar_widget.setFixedHeight(70)
+        self.status_bar_widget.setFixedHeight(110)
         outer.addWidget(self.status_bar_widget)
-        outer.addSpacing(8)
 
-        # ── Erasure progress bar (hidden until needed) — dark with red fill
+        # Erasure progress bar (hidden until needed)
         self.erase_bar = QProgressBar()
         self.erase_bar.setRange(0, 100)
         self.erase_bar.setValue(0)
@@ -584,6 +605,10 @@ class LockWindow(QMainWindow):
         """)
         self.erase_bar.hide()
         outer.addWidget(self.erase_bar)
+
+        # No mascot or waveform widgets — the video is doing both visually.
+        self.mascot = None
+        self.waveform = None
 
     def _make_fullscreen(self):
         self.setWindowFlags(
@@ -609,9 +634,15 @@ class LockWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "bg"):
+        if hasattr(self, "video_widget") and self.video_widget is not None:
+            self.video_widget.setGeometry(self.rect())
+            self.video_widget.lower()
+        if hasattr(self, "bg") and self.bg is not None:
             self.bg.setGeometry(self.rect())
             self.bg.lower()
+        if hasattr(self, "overlay"):
+            self.overlay.setGeometry(self.rect())
+            self.overlay.raise_()
 
     # ──────────────────────────────────────────────────────────── Behavior
 
@@ -619,26 +650,36 @@ class LockWindow(QMainWindow):
         from datetime import datetime
         self.clock_label.setText(datetime.now().strftime("%a %d %b  %H:%M:%S"))
 
+    # ── Safe helpers: mascot/waveform may be None when video bg is active
+    def _set_mascot(self, mode: str):
+        if self.mascot is not None:
+            self.mascot.set_mode(mode)
+
+    def _wf_push(self, rms: float):
+        if self.waveform is not None:
+            self.waveform.push_sample(rms)
+
+    def _wf_intensity(self, value: float):
+        if self.waveform is not None:
+            self.waveform.set_intensity(value)
+
     def _on_ambient(self, rms: float, voiced: bool):
         if time.time() < self.locked_until:
             return
-        self.waveform.push_sample(rms)
+        self._wf_push(rms)
         if voiced and self.status_bar_widget._text == config.IDLE_TEXT:
-            # Subtle handoff: enter listening mode on first sound
             self.status_bar_widget.set_text(config.LISTENING_TEXT, TEXT_CYAN)
-            self.waveform.set_intensity(0.6)
+            self._wf_intensity(0.6)
 
     def _on_speech_detected(self):
         if time.time() < self.locked_until:
             return
-        self.mascot.set_mode("listening")
+        self._set_mascot("listening")
         self.status_bar_widget.set_text(config.PROCESSING_TEXT, TEXT_CYAN)
-        self.waveform.set_intensity(1.0)
+        self._wf_intensity(1.0)
 
     def _on_waveform_arrived(self, samples):
-        # Push the captured samples into the live waveform buffer for a
-        # moment so it visibly reacts to the user's actual voice.
-        if samples is None or len(samples) == 0:
+        if self.waveform is None or samples is None or len(samples) == 0:
             return
         n = 220
         idx = np.linspace(0, len(samples) - 1, n).astype(int)
@@ -647,16 +688,16 @@ class LockWindow(QMainWindow):
             self.waveform.push_sample(float(v))
 
     def _on_success(self, sim: float):
-        self.mascot.set_mode("ok")
+        self._set_mascot("ok")
         self.status_bar_widget.set_text(config.SUCCESS_TEXT, TEXT_WHITE)
-        self.waveform.set_intensity(0.4)
+        self._wf_intensity(0.4)
         log.info("Unlocked. similarity=%.3f", sim)
         if self.worker:
             self.worker.stop()
         QTimer.singleShot(1800, QApplication.quit)
 
     def _on_fail(self, sim: float):
-        self.mascot.set_mode("fail")
+        self._set_mascot("fail")
         self.fail_count += 1
         line = random.choice(config.MOCK_LINES)
         self.status_bar_widget.set_text(line, QColor("#FFE0E0"))
@@ -665,13 +706,13 @@ class LockWindow(QMainWindow):
             self._trigger_erasure()
             return
 
-        # Re-arm after a beat
-        QTimer.singleShot(2200, lambda: (
-            self.mascot.set_mode("idle"),
-            self.status_bar_widget.set_text(config.IDLE_TEXT, TEXT_CYAN),
-            self.waveform.set_intensity(0.0),
-            self.worker and self.worker.pause(False),
-        ))
+        def _rearm():
+            self._set_mascot("idle")
+            self.status_bar_widget.set_text(config.IDLE_TEXT, TEXT_CYAN)
+            self._wf_intensity(0.0)
+            if self.worker:
+                self.worker.pause(False)
+        QTimer.singleShot(2200, _rearm)
 
     def _trigger_erasure(self):
         self.status_bar_widget.set_text(config.ERASURE_TEXT, QColor("#FFE0E0"))
@@ -696,13 +737,13 @@ class LockWindow(QMainWindow):
     def _reset_after_lockout(self):
         self.fail_count = 0
         self.erase_bar.hide()
-        self.mascot.set_mode("idle")
+        self._set_mascot("idle")
         self.status_bar_widget.set_text(config.IDLE_TEXT, TEXT_CYAN)
         if self.worker:
             self.worker.pause(False)
 
     def _on_error(self, msg: str):
-        self.mascot.set_mode("fail")
+        self._set_mascot("fail")
         self.status_bar_widget.set_text(f"error: {msg.lower()}",
                                         QColor("#FFE0E0"))
 

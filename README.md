@@ -43,6 +43,8 @@ This is that. On your Mac. Actually working.
 |:---:|:---:|:---:|
 | ![](demo/frames/05_denied.png) | ![](demo/frames/06_erasure.png) | ![](demo/frames/07_locked.png) |
 
+> The background is the **actual buddy-mascot footage from the film**, denoised, sharpened and upscaled to 1200p with FFmpeg, then looped (forward + reverse) for seamless playback. The bottom red bar is a live PyQt overlay that updates with your auth state — so the look is film-accurate while the logic is real.
+
 ---
 
 ## 🚀 Install
